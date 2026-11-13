@@ -1,0 +1,15 @@
+# Executables built in the project root
+/sbt
+/probe_b
+
+# Build output
+/build/
+*.o
+
+# Local experiment output
+/output.txt
+
+# Editor temporary files
+*~
+*.swp
+*.swo
