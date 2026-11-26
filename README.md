@@ -19,6 +19,7 @@ Before writing, B checks that the device and inode of its open descriptor match 
 ## Requirements
 
 - Linux with permission to run Bubblewrap and create the namespaces used by the experiment.
+- CMake 3.16 or later and a build tool such as Make or Ninja.
 - A C++20 compiler. The build commands below use Clang.
 - Bubblewrap installed at `/usr/bin/bwrap`.
 - A project directory visible inside the sandbox, such as a directory under your home directory.
@@ -27,22 +28,23 @@ Run the experiment as your normal user in a development environment. This config
 
 ## Build
 
-From the project directory:
+From the project root (the directory containing `CMakeLists.txt`), configure a Debug build with Clang and build both executables:
 
 ```bash
-clang++ -std=c++20 -Wall -Wextra -Wpedantic -g -O1 sbt.cpp -o sbt
-clang++ -std=c++20 -Wall -Wextra -Wpedantic -g -O1 probe_b.cpp -o probe_b
+cmake -S . -B build -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_BUILD_TYPE=Debug
+cmake --build build
 ```
 
-Rebuild both executables after changing `shared_data.h`. They exchange a native `Result` structure through a pipe and must agree on its layout.
+CMake stores the configuration and build files in `build/`. After editing a source file or a shared header, run `cmake --build build` again from the project root. Changes to `shared_data.h` trigger recompilation of both executables so they agree on the layout of `Result`.
 
 ## Run
 
 Usage: `./sbt <path_to_test> --mode <mode>`. The path is resolved inside B's sandbox.
 
-Run these examples sequentially from the directory containing both executables:
+From the project root, enter `build/` and run the examples sequentially. The orchestrator launches `./probe_b` relative to its working directory.
 
 ```bash
+cd build
 ./sbt /tmp/private_A.txt --mode confidentiality
 ./sbt /mnt/private_A.txt --mode confidentiality
 ./sbt /mnt/private_A.txt --mode persistent-integrity
