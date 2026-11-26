@@ -17,13 +17,14 @@
 using namespace SBT;
 
 constexpr char canary[] =
-    "e4b71906f85c2d3a94e0b76f1c328d5a"
+    "A4b71906f85c2d3a94e0b76f1c328d5a"
     "6f0a2c9d73e18b45a5d06e9c4b128f37"
     "c93d4f7a10b25e688f0c1a7d62e49b35"
     "58a1e0c7d9f6423b0f7a8d5e21c9634b";
 constexpr size_t canary_size = sizeof(canary) - 1;
 static_assert(canary_size == 128);
 static_assert(canary_size == sizeof(Result::data));
+static_assert(canary[0] == expected_original_byte);
 
 void close_and_delete_canary(int canary_fd)
 {
@@ -79,9 +80,35 @@ void kill_wait_and_clean_up(pid_t child_pid, int pipe_read_fd)
 
 int main(int argc, char* argv[])
 {
-    if (argc != 2)
+    if (argc != 4)
     {
-        std::cerr << "Expected path to test" << std::endl;
+        std::cerr << "Incorrect number of arguments: sbt <path_to_test> --mode <mode>\n";
+        return EXIT_FAILURE;
+    }
+
+    if (std::strcmp(argv[2], "--mode"))
+    {
+        std::cerr << "Missing --mode: sbt <path_to_test> --mode <mode>\n";
+        return EXIT_FAILURE;
+    }
+
+    Mode experiment_mode {};
+    const char *const mode = argv[3];
+    if (std::strcmp(mode, confidentiality) == 0)
+    {
+        experiment_mode = Mode::Confidentiality;
+    }
+    else if (std::strcmp(mode, transient_integrity) == 0)
+    {
+        experiment_mode = Mode::TransientIntegrity;
+    }
+    else if (std::strcmp(mode, persistent_integrity) == 0)
+    {
+        experiment_mode = Mode::PersistentIntegrity;
+    }
+    else
+    {
+        std::cerr << "A: Invalid mode. Use confidentiality, transient-integrity or persistent-integrity.\n";
         return EXIT_FAILURE;
     }
 
@@ -154,14 +181,14 @@ int main(int argc, char* argv[])
         {
             std::cout << "A: Child file access status: " << child_result.file_access_status << std::endl;
             if (child_result.error != 0)
-                std::cout << "A: Error experienced by child while trying to open or read private file: " << child_result.error << std::endl;
+                std::cout << "A: Error experienced by child while trying to open, read or write file: " << child_result.error << std::endl;
 
             if (!child_result.identity_checked)
             {
                 std::cout << "A: Child could not check file identity\n";
                 if (child_result.file_access_status == Status::CannotOpen)
                 {
-                    std::cout << "A: Child could not open file with O_RDWR\n";
+                    std::cout << "A: Child could not open file\n";
                 }
                 else
                 {
@@ -178,33 +205,47 @@ int main(int argc, char* argv[])
                 std::cout << "A: File has different identity in orchestrator and in child\n";
             }
 
-            const std::size_t n = child_result.bytes_read;
-            if (n > sizeof(child_result.data))
+            if (experiment_mode == Mode::Confidentiality)
             {
-                std::cerr << "A: Invalid probe result: reported " << n
-                          << " bytes, but the buffer holds " << sizeof(child_result.data) << '\n';
+                const std::size_t n = child_result.bytes_read;
+                if (n > sizeof(child_result.data))
+                {
+                    std::cerr << "A: Invalid probe result: reported " << n
+                              << " bytes, but the buffer holds " << sizeof(child_result.data) << '\n';
 
-                kill_wait_and_clean_up(child_pid, pipefd[0]);
-                close_and_delete_canary(canary_fd);
-                return EXIT_FAILURE;
-            }
-            else if (n > 0)
-            {
-                if (std::memcmp(canary, child_result.data, n) == 0)
-                    std::cout << "A: The " << n << " bytes read match the canary prefix\n";
-                else
-                    std::cout << "A: The " << n << " bytes read differ from the canary prefix\n";
-            }
-            else if (child_result.file_access_status == Status::PartialRead)
-            {
-                std::cout << "A: Child reached EOF before reading any bytes\n";
+                    kill_wait_and_clean_up(child_pid, pipefd[0]);
+                    close_and_delete_canary(canary_fd);
+                    return EXIT_FAILURE;
+                }
+                else if (n > 0)
+                {
+                    if (std::memcmp(canary, child_result.data, n) == 0)
+                        std::cout << "A: The " << n << " bytes read match the canary prefix\n";
+                    else
+                        std::cout << "A: The " << n << " bytes read differ from the canary prefix\n";
+                }
+                else if (child_result.file_access_status == Status::PartialRead)
+                {
+                    std::cout << "A: Child reached EOF before reading any bytes\n";
+                }
             }
 
             kill_wait_and_clean_up(child_pid, pipefd[0]);
 
+
             //Check if we can detect potential modification once the child process is dead
             //Read file and compare with the canary stored in memory
+            if (experiment_mode == Mode::PersistentIntegrity ||
+                experiment_mode == Mode::TransientIntegrity)
             {
+
+                std::cout << "A: Child write result: " << child_result.write_result << std::endl;
+                if (experiment_mode == Mode::TransientIntegrity)
+                {
+                    std::cout << "A: Child restore result: " << child_result.restore_result << std::endl;
+                }
+
+
                 errno = 0;
                 std::size_t total_bytes_read = 0;
                 ssize_t bytes_read = 0;
@@ -241,14 +282,16 @@ int main(int argc, char* argv[])
                         std::cout << "A: File size changed to " << canary_file_info.st_size << std::endl;
 
 
-                    if (std::memcmp(buf, canary, total_bytes_read) == 0 && total_bytes_read == canary_size &&
+                    if (std::memcmp(buf, canary, total_bytes_read) == 0 &&
+                        total_bytes_read == canary_size &&
                         canary_size == canary_file_info.st_size)
                     {
                         std::cout << "A: Same " << total_bytes_read << " bytes\n";
                     }
                     else
                     {
-                        std::cout << "A: Not the same " << total_bytes_read << " bytes\n";
+                        std::cout << "A: Canary differs in size or content. Total bytes read: "
+                                << total_bytes_read << std::endl;
                     }
                 }
             }
@@ -280,7 +323,8 @@ int main(int argc, char* argv[])
             "--tmpfs", "/tmp",
             "--die-with-parent",
             "./probe_b", "--notify-fd", std::to_string(pipefd[1]), argv[1],
-            std::to_string(stat_info.st_dev), std::to_string(stat_info.st_ino)
+            std::to_string(stat_info.st_dev), std::to_string(stat_info.st_ino),
+            argv[3]
         };
 
         std::vector<char*> args_for_execv;
