@@ -1,71 +1,85 @@
 # Sandbox Boundary Tester (SBT)
 
-Experimental C++20 project for testing isolation boundaries using controlled probes and verifiable evidence. The intended scope is to evaluate concrete accesses against an expected isolation policy, including environments that run sandboxed AI agents.
+Sandbox Boundary Tester is an experimental C++20 project for testing isolation boundaries on Linux. Its goal is to evaluate concrete file accesses against an expected isolation policy, including in environments that run sandboxed AI agents.
 
 ## Current status
 
-The first prototype runs one controlled file-reading probe inside Bubblewrap. The orchestrator creates a resource representing A's private file on the host; there is not yet a separate sandboxed A process.
+The orchestrator creates a 128-byte canary on the host to represent task A's private file and keeps its descriptor open throughout the experiment. It launches one controlled probe, B, inside Bubblewrap. A separate sandboxed process for A is future work.
 
-The experiment demonstrates that hiding a file's original path does not prevent access through another mount exposing the same object. This is a deliberately configured access path, not a Bubblewrap vulnerability or a sandbox escape.
+Each run selects one of three modes:
 
-There is no policy-file parser, automatic probe selection, integrity test, or general security certification yet.
+| Mode | What B attempts |
+| --- | --- |
+| `confidentiality` | Open the path read-only and return up to 128 bytes. |
+| `persistent-integrity` | Open the path write-only and change the first byte from `A` to `B`. |
+| `transient-integrity` | Perform the same write, then restore `A` if the first write succeeds. |
+
+Before writing, B checks that the device and inode of its open descriptor match the identity supplied by the orchestrator. For confidentiality, B reports identity and content separately, so the orchestrator can distinguish matching bytes from a matching file identity.
 
 ## Requirements
 
-- Linux with permission to run Bubblewrap and create the namespaces used by this experiment.
-- A C++20 compiler (commands below use Clang).
+- Linux with permission to run Bubblewrap and create the namespaces used by the experiment.
+- A C++20 compiler. The build commands below use Clang.
 - Bubblewrap installed at `/usr/bin/bwrap`.
-- Run from a project directory that remains visible inside the sandbox (for example, under your home directory, not `/tmp`).
+- A project directory visible inside the sandbox, such as a directory under your home directory.
 
-Use a development environment and your normal user account. The configuration exposes the host root read-only and is designed for this controlled probe; it is not a configuration for running arbitrary untrusted programs.
+Run the experiment as your normal user in a development environment. This configuration exposes the host root read-only and the host's `/tmp` through a writable bind mount. It is intended for the controlled probe included in this repository.
 
 ## Build
+
+From the project directory:
 
 ```bash
 clang++ -std=c++20 -Wall -Wextra -Wpedantic -g -O1 sbt.cpp -o sbt
 clang++ -std=c++20 -Wall -Wextra -Wpedantic -g -O1 probe_b.cpp -o probe_b
 ```
 
-Both programs must be built together against `shared_data.h`.
+Rebuild both executables after changing `shared_data.h`. They exchange a native `Result` structure through a pipe and must agree on its layout.
 
 ## Run
 
-Run these commands sequentially from the directory containing both executables:
+Usage: `./sbt <path_to_test> --mode <mode>`. The path is resolved inside B's sandbox.
+
+Run these examples sequentially from the directory containing both executables:
 
 ```bash
-./sbt /tmp/private_A.txt
-./sbt /mnt/private_A.txt
+./sbt /tmp/private_A.txt --mode confidentiality
+./sbt /mnt/private_A.txt --mode confidentiality
+./sbt /mnt/private_A.txt --mode persistent-integrity
+./sbt /mnt/private_A.txt --mode transient-integrity
 ```
 
-| Path tested inside B | Expected observation |
-| --- | --- |
-| `/tmp/private_A.txt` | Opening fails with `ENOENT`: the sandbox has a fresh tmpfs at `/tmp`. |
-| `/mnt/private_A.txt` | The probe reports matching device/inode identity and 128 bytes matching the canary. |
+The orchestrator creates a fresh `/tmp/private_A.txt` for each run. Inside B, `/tmp` is a fresh tmpfs and `/mnt` is a writable bind mount of the host's `/tmp`. Access through `/mnt` is deliberately configured as part of the experiment.
 
-The orchestrator creates `/tmp/private_A.txt` with exclusive creation and keeps its descriptor open. Bubblewrap exposes the host `/tmp` read-only at `/mnt`, then mounts a fresh tmpfs at `/tmp`. The probe reports its observations through a pipe.
+### Expected observations
 
-After receiving the result, the orchestrator sends `SIGKILL` to its direct child, waits for it and cleans up. `Child terminated due to signal: 9` is expected with the current lifecycle. The probe pauses after sending its result; this line describes the direct child, which is launched as Bubblewrap.
+| Path inside B | Mode | Probe report | Orchestrator observation |
+| --- | --- | --- | --- |
+| `/tmp/private_A.txt` | `confidentiality` | Open fails with `ENOENT`. | B reports `CannotOpen` and returns zero bytes. |
+| `/mnt/private_A.txt` | `confidentiality` | B reads all 128 bytes. | The reported device and inode match the host canary, and all returned bytes match its contents. |
+| `/mnt/private_A.txt` | `persistent-integrity` | The first write succeeds. | The file still has 128 bytes and its contents differ from the original. |
+| `/mnt/private_A.txt` | `transient-integrity` | The write and restoration both succeed. | The final size and all 128 bytes match the original. |
 
-The current diagnostic `Error reading canary 0 2` in the negative case means `CannotOpen` with `ENOENT`; the failure occurred during opening, not reading.
+In the transient case, the same final contents are possible if B restores the byte or if it never writes at all. B reports the write and restoration separately. The orchestrator independently checks the final file through its retained descriptor. It does not sample the intermediate byte.
 
-If creation fails with `EEXIST`, inspect the existing path before removing anything. A previous interrupted run may have left the file behind. Do not run multiple instances concurrently.
+After sending its report, B pauses. The orchestrator sends `SIGKILL` to its direct child, waits for it and cleans up. A message such as `Child terminated due to signal: 9` is expected with this lifecycle and refers to the direct child launched as Bubblewrap.
+
+If canary creation fails with `EEXIST`, inspect the existing path before removing anything. An interrupted run may have left the file behind. Run one instance at a time.
 
 ## Evidence and limitations
 
-- A successful controlled probe demonstrates a concrete access path. A failed attempt does not prove that every other path is blocked.
-- Whether an access violates isolation depends on the expected policy. Sharing is not inherently a violation.
-- The canary is a fixed, public 128-byte value embedded in the orchestrator, not an unpredictable secret.
-- Device/inode comparisons assume a local filesystem with stable identity semantics. These assumptions should not be generalized to every filesystem.
-- The orchestrator trusts the controlled probe's identity and read reports. It does not independently monitor arbitrary programs.
-- `Result` is transferred as a native C++ object representation, including possible padding. This is a same-build prototype protocol, not a portable or hardened wire format.
-- Pipe reads and child termination have no timeout. Some failure modes can block indefinitely; cleanup failures are not consistently reflected in the exit status.
-- Cleanup uses a fixed pathname. Path replacement races and interruption-safe cleanup remain unresolved.
-- A successful program exit indicates completion of the current reporting flow, not a security pass. Results are human-readable, not a stable machine-readable report.
+- A successful operation demonstrates access through the tested path. A failed operation describes that particular attempt. Interpreting either result requires an expected isolation policy.
+- The canary is a fixed, public 128-byte value. Matching content alone cannot establish file identity.
+- Device and inode comparisons assume a local filesystem with stable identity semantics.
+- The orchestrator trusts the controlled probe's identity, read, write and restoration reports. Independent observation is limited to the final size and contents in integrity mode.
+- The pipe protocol uses the native C++ representation of `Result`, including possible padding. It assumes compatible builds of both executables.
+- Pipe reads and child termination have no timeout. Cleanup uses a fixed pathname. Path replacement races and interruption-safe cleanup remain unresolved.
+- A successful exit indicates that the reporting flow completed. Results are human-readable, and some cleanup failures appear only in diagnostics. The prototype does not issue an automatic policy verdict.
 
 ## Validation so far
 
-Manual runs on the developer's Ubuntu VM showed `ENOENT` for the hidden path and matching identity plus all 128 bytes for the alternative mount. Repeating the alternative-path run succeeded, consistent with cleanup between runs. This is a functional check, not a comprehensive automated test suite.
+Manual runs of the earlier read-only prototype on the developer's Ubuntu VM showed `ENOENT` for the hidden path and matching identity plus all 128 bytes for the alternative mount. Repeating the alternative-path run also succeeded. The table above gives expected outcomes for the current three-mode CLI.
 
-## Next experiment
+## Next step
 
-Add a controlled write attempt and have the orchestrator inspect the retained original file to check final content and length. Compare a persistent modification with a modification that the probe restores before completion, illustrating the limits of checking only final state.
+Record the probe report and the orchestrator's final observation for both integrity modes. Include a run against the hidden path to check that B reports the write as `NotAttempted`.
