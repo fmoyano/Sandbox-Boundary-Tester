@@ -10,4 +10,5 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "^(GNU|Clang|AppleClang)$")
 endif()
 
 add_executable(sbt sbt.cpp)
-add_executable(probe_b probe_b.cpp)
+add_executable(probe_confidentiality probe_confidentiality.cpp)
+add_executable(probe_integrity probe_integrity.cpp)

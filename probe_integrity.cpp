@@ -53,11 +53,7 @@ int main(int argc, char* argv[])
 
     Mode experiment_mode {};
     const char *const mode = argv[6];
-    if (std::strcmp(mode, confidentiality) == 0)
-    {
-        experiment_mode = Mode::Confidentiality;
-    }
-    else if (std::strcmp(mode, transient_integrity) == 0)
+    if (std::strcmp(mode, transient_integrity) == 0)
     {
         experiment_mode = Mode::TransientIntegrity;
     }
@@ -67,14 +63,14 @@ int main(int argc, char* argv[])
     }
     else
     {
-        std::cerr << "B: Invalid mode. Use confidentiality, transient-integrity or persistent-integrity.\n";
+        std::cerr << "B: Invalid mode. Use transient-integrity or persistent-integrity.\n";
         return EXIT_FAILURE;
     }
 
     Result operation_result {};
     std::cout << "B: Trying to open path: " << argv[3] << std::endl;
 
-    int fd = open(argv[3], experiment_mode == Mode::Confidentiality ? O_RDONLY : O_WRONLY);
+    int fd = open(argv[3], O_WRONLY);
     if (fd == -1)
     {
         operation_result.error = errno;
@@ -99,27 +95,12 @@ int main(int argc, char* argv[])
             operation_result.st_ino = stat_info.st_ino;
         }
 
-        if (experiment_mode == Mode::Confidentiality)
-        {
-            constexpr std::size_t expected_bytes = sizeof(operation_result.data);
-            const ReadResult result = read_exact_fd(fd, operation_result.data, expected_bytes);
-            operation_result.bytes_read = result.bytes_read;
-            operation_result.error = result.error;
-            if (result.error != 0)
-                operation_result.file_access_status = Status::ReadError;
-            else if (result.bytes_read < expected_bytes)
-                operation_result.file_access_status = Status::PartialRead;
-            else
-                operation_result.file_access_status = Status::FullRead;
-        }
-
         // The probe will only write if the identity of the file
         // has been confirmed to be the same as the one passed by the parent
-        else if (operation_result.identity_checked &&
+        if (operation_result.identity_checked &&
                 operation_result.st_dev == expected_st_dev &&
                 operation_result.st_ino == expected_st_ino)
         {
-
             //Write one byte to the file
             ssize_t bytes_written = 0;
             constexpr char buff_to_write = 'B';
@@ -139,7 +120,7 @@ int main(int argc, char* argv[])
                     bytes_written = 0;
                     do
                     {
-                        bytes_written = pwrite(fd, &expected_original_byte, 1, 0);
+                        bytes_written = pwrite(fd, &expected_first_byte_integrity, 1, 0);
                     } while (bytes_written == -1 && errno == EINTR);
 
                     if (bytes_written == 1)

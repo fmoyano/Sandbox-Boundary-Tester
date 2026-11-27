@@ -11,24 +11,19 @@
 #include <vector>
 #include <fcntl.h>
 #include <sys/stat.h>
+#include <sys/random.h>
 #include "shared_data.h"
 #include "utils.h"
 
 using namespace SBT;
 
-constexpr char canary[] =
-    "A4b71906f85c2d3a94e0b76f1c328d5a"
-    "6f0a2c9d73e18b45a5d06e9c4b128f37"
-    "c93d4f7a10b25e688f0c1a7d62e49b35"
-    "58a1e0c7d9f6423b0f7a8d5e21c9634b";
-constexpr size_t canary_size = sizeof(canary) - 1;
+constexpr size_t canary_size = sizeof(Result::data);
 static_assert(canary_size == 128);
-static_assert(canary_size == sizeof(Result::data));
-static_assert(canary[0] == expected_original_byte);
+constexpr char const *private_file = "/tmp/private_A.txt";
 
 void close_and_delete_canary(int canary_fd)
 {
-    if (unlink("/tmp/private_A.txt") == -1)
+    if (unlink(private_file) == -1)
     {
         perror("unlink");
     }
@@ -112,7 +107,32 @@ int main(int argc, char* argv[])
         return EXIT_FAILURE;
     }
 
-    int canary_fd = open("/tmp/private_A.txt", O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+    char canary[canary_size];
+    ssize_t bytes_read = 0;
+    do
+    {
+        bytes_read = getrandom(canary, canary_size, 0);
+
+        //According to the manual, this situation should never happen for sizes <= 256...
+        //"but the careful programmer will check for this anyway!"
+        if (bytes_read >= 0 && static_cast<size_t>(bytes_read) < canary_size)
+        {
+            std::cerr << "Obtained bytes vs expected bytes: " << bytes_read << " " << canary_size << std::endl;
+            return EXIT_FAILURE;
+        }
+    } while (bytes_read == -1 && errno == EINTR);
+    if (bytes_read == -1)
+    {
+        perror("getrandom");
+        return EXIT_FAILURE;
+    }
+
+    if (experiment_mode != Mode::Confidentiality)
+    {
+        canary[0] = expected_first_byte_integrity;
+    }
+
+    int canary_fd = open(private_file, O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
     if (canary_fd == -1)
     {
         perror("open file");
@@ -232,7 +252,6 @@ int main(int argc, char* argv[])
 
             kill_wait_and_clean_up(child_pid, pipefd[0]);
 
-
             //Check if we can detect potential modification once the child process is dead
             //Read file and compare with the canary stored in memory
             if (experiment_mode == Mode::PersistentIntegrity ||
@@ -244,7 +263,6 @@ int main(int argc, char* argv[])
                 {
                     std::cout << "A: Child restore result: " << child_result.restore_result << std::endl;
                 }
-
 
                 errno = 0;
                 std::size_t total_bytes_read = 0;
@@ -315,17 +333,32 @@ int main(int argc, char* argv[])
         std::vector<std::string> arguments =
         {
             "bwrap",
-            "--ro-bind", "/", "/",
-            "--unshare-pid",
-            "--proc", "/proc",
-            "--dev", "/dev",
-            "--bind", "/tmp", "/mnt",
-            "--tmpfs", "/tmp",
-            "--die-with-parent",
-            "./probe_b", "--notify-fd", std::to_string(pipefd[1]), argv[1],
-            std::to_string(stat_info.st_dev), std::to_string(stat_info.st_ino),
-            argv[3]
+                "--ro-bind", "/", "/",
+                "--unshare-pid",
+                "--proc", "/proc",
+                "--dev", "/dev",
+                "--bind", "/tmp", "/mnt",
+                "--tmpfs", "/tmp",
+                "--die-with-parent"
         };
+
+        const bool is_confidentiality = experiment_mode == Mode::Confidentiality;
+        arguments.insert(arguments.end(), {
+            is_confidentiality ? "./probe_confidentiality" : "./probe_integrity",
+            "--notify-fd",
+            std::to_string(pipefd[1]),
+            argv[1] //path to test
+        });
+
+        if (!is_confidentiality)
+        {
+            arguments.insert(arguments.end(),
+            {
+                std::to_string(stat_info.st_dev),
+                std::to_string(stat_info.st_ino),
+                argv[3] //transient-integrity or persistent-integrity
+            });
+        }
 
         std::vector<char*> args_for_execv;
         args_for_execv.reserve(arguments.size() + 1);
@@ -335,12 +368,9 @@ int main(int argc, char* argv[])
         }
         args_for_execv.push_back(nullptr);
 
-        int result = execve("/usr/bin/bwrap", args_for_execv.data(), nullptr);
-        if (result == -1)
-        {
-            perror("B: execve");
-            _exit(EXIT_FAILURE);
-        }
+        execve("/usr/bin/bwrap", args_for_execv.data(), nullptr);
+        perror("B: execve");
+        _exit(EXIT_FAILURE);
     }
 
     return 0;

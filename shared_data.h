@@ -13,7 +13,7 @@ namespace SBT {
     inline constexpr char persistent_integrity[] = "persistent-integrity";
 
     // This is the first byte of the canary: used for the integrity test
-    inline constexpr char expected_original_byte = 'A';
+    inline constexpr char expected_first_byte_integrity = 'A';
 
     enum class Mode {
         Confidentiality = 0,
